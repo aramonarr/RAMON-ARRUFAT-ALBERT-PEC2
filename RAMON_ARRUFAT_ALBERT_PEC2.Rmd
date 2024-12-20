@@ -1,0 +1,409 @@
+---
+title: "RAMON_ARRUFAT_ALBERT_PEC2"
+subtitle: "Segunda prueba de evaluación continua"
+author: "Albert Ramon Arrufat"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    self-contained: true
+bibliography: "ADOreferences.bib"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+# Configuración global para reproducibilidad y orden
+library(knitr)
+options(max.print = 75)
+opts_chunk$set(echo = TRUE, cache = FALSE, tidy = TRUE, comment = NA, message = FALSE, warning = FALSE)
+opts_knit$set(width = 75)
+```
+
+## Introducción
+
+Mi solución de la PEC tiene dos objetivos principales:
+       1. Mostrar un modelo de resolución de las preguntas planteadas que sirva como ejemplo.
+       2. Incluir explicaciones sobre el desarrollo del trabajo, siguiendo las instrucciones de la PEC.
+
+
+## Objetivos
+
+El objetivo principal de este trabajo es realizar un análisis exploratorio y de control de calidad sobre datos de microarrays de unos datos descargados de la base de datos [Gene Expression Omnibus(GEO)] (https://www.ncbi.nlm.nih.gov/geo/) utilizando el programa estadístico R y las librerías para análisis de datos ómicos integradas en Bioconductor.
+En concreto se requiere que los datos descargados se almacenen en un objeto de clase `ExpressionSet` y que se acceda a ellos a través de este objeto.
+
+
+## Materiales y Métodos
+
+### Fuentes de Datos
+Los datos se obtuvieron de la base [Gene Expression Omnibus (GEO)](https://www.ncbi.nlm.nih.gov/geo/) utilizando el identificador GSE38531.
+Este paquete permite  descargar los datos indicados (por un identificador GSE o GDS) y crear con ellos una estructura de datos del tipo `expressionSet` que contiene una matriz de datos preprocesados (habitualmente normalizados, así como una tabla con información sobre covariables y tras aspectos del experimento.
+
+### Metodología
+La exploración se llevará a cabo siguiendo la plantilla de un caso de estudio, [Analisis_de_datos_omicos-Ejemplo_0-Microarrays](https://github.com/ASPteaching/Analisis_de_datos_omicos-Ejemplo_0-Microarrays) del profesor Alex Sánches Pla. 
+
+Básicamente dicha exploración consistirá en:
+1. **Control de calidad**: Evaluación inicial con el paquete `arrayQualityMetrics` para identificar posibles    
+problemas y evaluar la calidad de las muestras..
+
+2. **Normalización**: Conversión de los datos crudos a una matriz de expresión utilizando el algoritmo RMA (Robust  Multi-array Average).
+
+3. **Filtrado**: Selección de las sondas con mayor variabilidad para centrarse en las más informativas.
+
+4. **Análisis diferencial**: Creación de matrices de diseño y contrastes con `limma` para realizar las tres comparaciones propuestas en el estudio.
+
+5. **Anotación y análisis funcional**: Uso de `clusterProfiler` para enriquecer los resultados biológicos y ver la asociación de identificadores como "Symbol", "EntrezID" o "EnsemblID" a los genes identificados.
+
+6. **Análisis funcional**: Realización de análisis de sobre-representación y GSEA con el paquete clusterProfiler para interpretar la significación biológica de los resultados, complementados con visualizaciones para facilitar su interpretación.
+
+Este enfoque garantizará la calidad y relevancia de los datos en cada etapa del análisis.
+
+
+
+## Resultados
+
+
+```{r cars}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+   install.packages("BiocManager")
+ }
+BiocManager::install("GEOquery")
+library(GEOquery)
+library(limma)
+library(edgeR)
+library(pheatmap)
+install.packages("ggplot2")
+
+```
+
+Descargo los datos crudos del sitio de GEO https://www.ncbi.nlm.nih.gov/geo/query/a
+cc.cgi?acc=GSE38531
+Con el fin de simplificar el análisis y dificultar un mínimo el intercambio no permitido de información eliminaremos algunas muestras: 
+- Por un lado, prescindiremos de las cinco muestras tomadas a las dos horas 
+- Por otro lado, y tal como se solicita, sortearé las muestras restantes de forma que conservamos tan sólo cuatro muestras de cada grupo. Esto lo haré con la función selectSamples que encontramos en el archivo selectSamples.R (descargado del material de PEC) y que nos permitirá extraer 24 muestras distintas a cada uno con tan solo llamarla usando como semilla (argumento “seed”) mi número de expediente de la UOC(1418474). 
+
+
+
+```{r pressure, echo=FALSE}
+gse <- getGEO("GSE38531", GSEMatrix = TRUE, AnnotGPL = TRUE)
+
+# Extraemos los metadatos
+pdata <- pData(gse[[1]])
+
+# Filtraremos las muestras tomadas a las 2 horas
+pdata$time <- as.numeric(gsub("time \\(0h/2h/24h post infection\\): ", "", 
+                              pdata$`time (0h/2h/24h post infection):ch1`))
+
+#Ahora podemos eliminar las muestras tomadas a las 2 horas
+pdata_filtrado <- subset(pdata, time != 2)
+
+# Verificamos que se eliminaron correctamente
+table(pdata_filtrado$time)
+
+```
+
+
+```{r pressure, echo=FALSE}
+# Cargamos la función desde el archivo selectSamples.R y preparamos las columnas necesarias para el filtrado
+source("~/UOC/PEC2/selectSamples.R")
+
+pdata_filtrado$sample <- rownames(pdata_filtrado)
+pdata_filtrado$infection <- ifelse(is.na(pdata_filtrado$`pathogen strain:ch1`), 
+                                   "uninfected", "S. aureus USA300")
+pdata_filtrado$time <- paste0("hour ", pdata_filtrado$`time (0h/2h/24h post infection):ch1`)
+pdata_filtrado$agent <- gsub("drug treatment  \\(linezolid/vancomycin/no\\): ", "", 
+                             pdata_filtrado$`drug treatment  (linezolid/vancomycin/no):ch1`)
+
+# Aplicaremos la función para seleccionar 4 muestras por grupo
+set.seed(1418474)
+result <- filter_microarray(pdata_filtrado, seed = 1418474)
+
+# Vemos que el resultado sea correcto tal y como se solicita en el enunciado de la PEC.
+print(result)
+
+```
+
+
+Pasamos a crear un nuevo ExpressionSet, donde filtraremos la matriz de expresión original para incluir solo las muestras seleccionadas y asi poder crear un ExpressionSet.
+ 
+```{r pressure, echo=FALSE}
+
+# Extraemos las filas correspondientes a las muestras seleccionadas
+selected_samples <- result$sample
+expression_data <- exprs(gse[[1]])[, selected_samples]
+
+# Creamos el nuevo ExpressionSet
+library(Biobase)
+nuevo_eset <- ExpressionSet(assayData = expression_data, 
+                          phenoData = AnnotatedDataFrame(pdata_filtrado[selected_samples, ]))
+
+```
+
+
+Para poder trabajar directamente con los archivos .CEL en lugar del objeto descargado desde GEO, utilizaremos el paquete affy. Necesitamos hacer coincidir los nombres de selected_samples con los nombres de los archivos .CEL usando coincidencias parciales. Esto realizar mediante grep o grepl.
+sapply: Itera sobre cada identificador en selected_samples y busca si está contenido en los nombres base de cel_files usando grepl.
+grepl: Realiza una coincidencia parcial, es decir, verifica si el ID está en alguna parte del nombre del archivo .CEL.
+
+```{r pressure, echo=FALSE}
+# Extraemos los identificadores simples de los nombres seleccionados, asumiendo claro que selected_samples contiene GSM IDs como "GSM944857"
+selected_ids <- selected_samples  
+cel_files <- list.files(path = "~/UOC/PEC2/GSE38531_RAW", 
+                        pattern = "\\.CEL$", full.names = TRUE)
+
+
+# Filtramos archivos .CEL que contengan los IDs seleccionados
+cel_files_selected <- cel_files[sapply(selected_ids, function(id) {
+  any(grepl(id, basename(cel_files)))
+})]
+
+# Instalamos y cargamos affy
+if (!requireNamespace("affy", quietly = TRUE)) {
+  BiocManager::install("affy")
+}
+library(affy)
+
+# Ahora ya podemos leer los archivos .CEL de las muestras seleccionadas
+eset_cel <- ReadAffy(filenames = cel_files_selected)
+
+```
+
+
+## Análisis exploratorio de los datos y control de calidad
+A partir de este ExpressionSet personalizado, con 24 muestras muestras podemos proceder a realizar una exploración básica
+
+```{r pressure, echo=FALSE}
+# Antes de normalizar, exploramos los datos crudos con boxplots y densidades.
+boxplot(exprs(nuevo_eset), main = "Distribución de los valores de expresión", col = "red")
+hist(as.vector(exprs(nuevo_eset)), breaks = 50, main = "Densidad de los valores de expresión", col = "red")
+
+```
+
+
+Aplicamos la normalización RMA para ajustar las intensidades.
+
+```{r pressure, echo=FALSE}
+
+eset_normalized <- rma(eset_cel)
+
+# Visualizamos los datos después de normalización
+boxplot(exprs(eset_normalized), main = "Distribución tras normalización (RMA)", col = "lightgreen")
+hist(as.vector(exprs(eset_normalized)), breaks = 50, main = "Densidad de los valores de expresión tras normalización (RMA)", col = "blue")
+```
+
+
+
+Complementamos el análisis exploratorio con un control de calidad exhaustivo con arrayQualityMetrics
+```{r pressure, echo=FALSE}
+BiocManager::install("arrayQualityMetrics")
+library(arrayQualityMetrics)
+arrayQualityMetrics(expressionset = eset_normalized, outdir = "QC_report", force = TRUE)
+
+```
+
+
+Para el filtrado de datos, seleccionamos las sondas más variables reteniendo el 10% con mayor variabilidad.
+```{r pressure, echo=FALSE}
+# Calculamos la desviación estándar por sonda
+variabilidad <- apply(exprs(eset_normalized), 1, sd)
+
+# Filtramos el 10% de sondas con mayor variabilidad
+threshold <- quantile(variabilidad, 0.9)
+filtered_eset <- eset_normalized[variabilidad >= threshold, ]
+png("variabilidad_sondas.png", width = 800, height = 600)
+ggplot(data, aes(x = Probe, y = Variability, color = Filtered)) +
+     geom_point() +
+     geom_hline(yintercept = threshold, linetype = "dashed", color = "red") +
+     labs(
+         title = "Variabilidad de las sondas",
+         x = "Índice de la Sonda",
+         y = "Desviación Estándar",
+         color = "Filtrado"
+     ) +
+     theme_minimal()
+dev.off()
+
+```
+
+
+
+Construimos las matrices de diseño y los contrastes para realizar las siguientes comparaciones:
+
+1.Infectados vs no infectados tratados con Linezolid.
+2.Infectados vs no infectados tratados con Vancomicina.
+3.Linezolid vs Vancomicina.
+
+```{r pressure, echo=FALSE}
+# 1. Filtramos muestras comunes entre la matriz de expresión y pData
+common_samples <- intersect(colnames(expression_data), rownames(pdata_filtrado))
+expression_data_filtered <- expression_data[, common_samples]
+pdata_filtered <- pdata_filtrado[common_samples, ]
+
+# 2. Creamos un objeto ExpressionSet
+library(Biobase)
+filtered_eset <- ExpressionSet(
+    assayData = expression_data_filtered,
+    phenoData = AnnotatedDataFrame(pdata_filtered)
+)
+
+# 3. Creamos la matriz de diseño usando la variable 'agent'
+library(limma)
+design <- model.matrix(~ 0 + pData(filtered_eset)$agent)
+colnames(design) <- levels(as.factor(pData(filtered_eset)$agent))
+
+# 4. Definimos la matriz de contrastes usando los nombres correctos
+matriz_contrastes <- makeContrasts(
+  Linezolid_vs_Untreated = "linezolid - no",
+  Vancomycin_vs_Untreated = "vancomycin - no",
+  Linezolid_vs_Vancomycin = "linezolid - vancomycin",
+  levels = design
+)
+```
+
+
+
+
+Ahora que hemos definido la matriz de diseño y la matriz de contrastes correctamente, procedemos con el análisis de expresión diferencial en limma.Para el análisis de expresión diferencial, ajustaremos el modelo lineal y obtendremos las listas de genes diferencialmente expresados para cada comparación
+
+```{r pressure, echo=FALSE}
+# Ajustamos el modelo lineal
+fit <- lmFit(exprs(filtered_eset), design)
+fit2 <- contrasts.fit(fit, matriz_contrastes)
+fit2 <- eBayes(fit2)
+
+# Resultados para cada comparación
+results_linezolid <- topTable(fit2, coef = "Linezolid_vs_Untreated", adjust = "fdr", number = Inf)
+results_vancomycin <- topTable(fit2, coef = "Vancomycin_vs_Untreated", adjust = "fdr", number = Inf)
+results_comparison <- topTable(fit2, coef = "Linezolid_vs_Vancomycin", adjust = "fdr", number = Inf)
+
+# Guardamos los resultados
+write.csv(results_linezolid, "DEG_Linezolid_vs_Untreated.csv")
+write.csv(results_vancomycin, "DEG_Vancomycin_vs_Untreated.csv")
+write.csv(results_comparison, "DEG_Linezolid_vs_Vancomycin.csv")
+
+
+
+#Para visualizar los resultados del análisis de expresión diferencial realizaremos un volcano plot. Este gráfico nos mostrará el log2 fold change frente al -log10 del valor p ajustado, destacando los genes significativamente regulados diferencialmente
+library(ggplot2)
+library(ggrepel)
+ 
+generate_volcano_plot <- function(results, comparison_label) {
+  # Creamos columna de significancia si no existe
+  if (!"Significance" %in% colnames(results)) {
+    results$Significance <- with(
+      results,
+      ifelse(adj.P.Val < 0.1 & abs(logFC) > 0.5, "Significant", "Not Significant")
+    )
+  }
+  
+  # Dibujamos el gráfico
+  ggplot(results, aes(x = logFC, y = -log10(adj.P.Val), color = Significance)) +
+    geom_point(alpha = 0.6, size = 2) +
+    scale_x_continuous(limits = c(-2.5, 2.5)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    scale_color_manual(values = c("Significant" = "red", "Not Significant" = "grey")) +
+    labs(
+      title = paste("Volcano Plot:", comparison_label),
+      x = "log2 Fold Change",
+      y = "-log10 Adjusted p-value",
+      color = "Significance"
+    ) +
+    theme_minimal()
+}
+
+# Visualizamos el gráfico para cada comparación
+generate_volcano_plot(results_linezolid, "Linezolid vs Untreated")
+generate_volcano_plot(results_vancomycin, "Vancomycin vs Untreated")
+generate_volcano_plot(results_comparison, "Linezolid vs Vancomycin")
+
+```
+
+
+
+Anotaremos las listas de genes obtenidas utilizando org.Mm.eg.db (ratón).
+
+```{r pressure, echo=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+BiocManager::install("org.Mm.eg.db")
+library(org.Mm.eg.db)
+BiocManager::install("mouse4302.db")
+library(mouse4302.db)
+
+# Anotamos los genes usando EntrezID y Symbol
+gene_ids <- rownames(results_linezolid)
+
+# Ahora mapeamos los IDs de microarray a ENTREZID y SYMBOL
+mapped_entrez <- AnnotationDbi::select(
+    mouse4302.db,
+    keys = gene_ids,
+    columns = c("ENTREZID", "SYMBOL"),
+    keytype = "PROBEID"
+)
+
+# Eliminamos duplicados si es necesario
+mapped_entrez <- mapped_entrez[!duplicated(mapped_entrez$PROBEID), ]
+
+annotated_genes <- mapped_entrez
+
+
+# Guardamos anotación
+write.csv(annotated_genes, "Annotated_genes_Linezolid.csv", row.names = FALSE)
+
+
+
+```
+
+
+
+Una vez anotados los genes podemos intentaremos interpretar los resultados determinando si las listas se encuentran enriquecidas en algunas categorías biológicas
+
+```{r pressure, echo=FALSE}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+
+# Realizamos el análisis de enriquecimiento GO(Gene Ontology)). Para ello extraemos los IDs de tipo ENTREZID del objeto annotated_genes y los asignamos a entrez_ids
+entrez_ids <- annotated_genes$ENTREZID
+
+# Verificamos si hay valores NA en ENTREZIDs, filtrando para eliminar posibles NA antes de continuar:
+entrez_ids <- entrez_ids[!is.na(entrez_ids)]
+
+# Ahora realizamos el análisis de enriquecimiento GO:
+go_enrichment <- enrichGO(
+    gene          = entrez_ids,
+    OrgDb         = org.Mm.eg.db,
+    keyType       = "ENTREZID",
+    ont           = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.1,
+    qvalueCutoff  = 0.5   
+)
+
+
+# Visualizamos los resultados
+dotplot(go_enrichment, showCategory = 20)
+
+#Análisis KEGG
+kegg_enrichment <- enrichKEGG(
+    gene          = entrez_ids,
+    organism      = "mmu", # Código KEGG para ratón
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05
+)
+
+# Visualizamos los resultados
+dotplot(kegg_enrichment, showCategory = 20) 
+
+
+```
+
+
+
+
+
